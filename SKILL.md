@@ -54,13 +54,14 @@ Write a single self-contained HTML file. Structure:
 
 **Font choice**: Source Serif 4 is the default — it pairs well with LaTeX's Computer Modern and renders reliably in Playwright. For sans-serif figures, use Source Sans 3.
 
-**Semantic `data-*` markers are required**: add short `data-*` labels to every meaningful SVG group and leaf element. Use figure-local names; do not invent a heavy naming scheme.
+**Semantic `data-*` markers are required**: add short `data-*` labels to every meaningful SVG or HTML element. Use figure-local names; do not invent a heavy naming scheme.
 
 Examples:
 - Scatter plot: points layer `g` might use `data-layer="points"`, and each point might use `data-series="Ours"` and `data-point-id="0"`.
 - Legend: a legend row might use `data-legend-item="Baseline A"`.
+- HTML poster/card: a section title might use `data-section="motivation"` and an image might use `data-name="teaser"`.
 - Architecture diagram: a box might use `data-node="retriever"` and an arrow might use `data-edge="retriever-to-reranker"`.
-- Inspector output example: `[Ours:0](html[file="figure.html"] > svg[data-figure="example"] > g[data-layer="points"] > path.point[data-series="Ours"][data-point-id="0"])`.
+- Inspector output example: `[Ours:0](html[file="figure.html"] > body > svg[data-figure="example"] > g[data-layer="points"] > path.point[data-series="Ours"][data-point-id="0"])`.
 
 ### 3. Preview in Paper Context
 

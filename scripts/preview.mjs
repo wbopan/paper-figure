@@ -358,7 +358,14 @@ const FIG_SRC = "/f/${dirToken}/${figFileName}";
 const CURRENT_FILE_NAME = "${figFileName.replace(/\\/g, "\\\\").replace(/"/g, '\\"')}";
 const CURRENT_REL_PATH = "${currentRelPath}";
 const CURRENT_ABS_PATH = "${join(os.homedir(), currentRelPath).replace(/\\/g, '\\\\')}";
-const INSPECTOR_LEAF_SELECTOR = "rect,circle,path,text,line,ellipse,polygon,polyline,image";
+const INSPECTOR_SVG_TARGET_SELECTOR = "rect,circle,path,text,line,ellipse,polygon,polyline,image";
+const INSPECTOR_HTML_TEXT_TAGS = new Set(["h1", "h2", "h3", "h4", "h5", "h6", "p", "li", "figcaption", "caption", "td", "th", "a", "button", "label"]);
+const INSPECTOR_TEXT_LEAF_TAGS = new Set(["div", "span"]);
+const INSPECTOR_HTML_MEDIA_TAGS = new Set(["img"]);
+const INSPECTOR_HTML_CONTAINER_TAGS = new Set(["div", "section", "article", "aside", "figure"]);
+const INSPECTOR_HTML_IGNORED_TAGS = new Set(["html", "head", "body", "script", "style", "link", "meta", "title"]);
+const INSPECTOR_INLINE_TEXT_TAGS = new Set(["a", "abbr", "b", "br", "code", "em", "i", "mark", "small", "span", "strong", "sub", "sup", "u", "wbr"]);
+const INSPECTOR_CONTAINER_LABEL_SELECTOR = "h1,h2,h3,h4,h5,h6,figcaption,caption,label,.label,.sub-title,.sec-title,.ftitle";
 const INSPECTOR_GLOW_BLUE = "#2563eb";
 const INSPECTOR_GLOW_GREEN = "#16a34a";
 
@@ -420,11 +427,112 @@ function normalizeInspectorName(value) {
   return String(value || "").trim().replace(/\\s+/g, " ");
 }
 
+function getInspectorVisibleText(el) {
+  return normalizeInspectorName(typeof el.innerText === "string" ? el.innerText : el.textContent);
+}
+
+function hasOnlyInlineTextDescendants(el) {
+  return Array.from(el.children).every((child) => {
+    const childTag = child.tagName ? child.tagName.toLowerCase() : "";
+    if (!INSPECTOR_INLINE_TEXT_TAGS.has(childTag)) return false;
+    return hasOnlyInlineTextDescendants(child);
+  });
+}
+
+function isInspectorTextLeaf(el) {
+  const tag = el.tagName.toLowerCase();
+  if (!INSPECTOR_TEXT_LEAF_TAGS.has(tag)) return false;
+  if (!getInspectorVisibleText(el)) return false;
+  return hasOnlyInlineTextDescendants(el);
+}
+
+function prefersTextInspectorName(el) {
+  const tag = el.tagName.toLowerCase();
+  if (tag === "text") return true;
+  if (INSPECTOR_HTML_TEXT_TAGS.has(tag)) return true;
+  return isInspectorTextLeaf(el);
+}
+
+function isInspectorVisible(el) {
+  if (!el || !el.isConnected) return false;
+  let current = el;
+  while (current && current.nodeType === Node.ELEMENT_NODE) {
+    const style = current.ownerDocument.defaultView.getComputedStyle(current);
+    if (!style) break;
+    if (style.display === "none" || style.visibility === "hidden") return false;
+    if (Number.parseFloat(style.opacity || "1") === 0) return false;
+    if (style.pointerEvents === "none") return false;
+    current = current.parentElement;
+  }
+  return true;
+}
+
+function hasVisiblePaint(style) {
+  if (!style) return false;
+  return style.backgroundColor !== "rgba(0, 0, 0, 0)" &&
+    style.backgroundColor !== "transparent";
+}
+
+function hasVisibleBorder(style) {
+  if (!style) return false;
+  return ["Top", "Right", "Bottom", "Left"].some((side) => {
+    const borderStyle = style["border" + side + "Style"];
+    const borderWidth = Number.parseFloat(style["border" + side + "Width"] || "0");
+    const borderColor = style["border" + side + "Color"];
+    if (!borderStyle || borderStyle === "none") return false;
+    if (!(borderWidth > 0)) return false;
+    return borderColor !== "rgba(0, 0, 0, 0)" && borderColor !== "transparent";
+  });
+}
+
+function isInspectorHtmlContainerTarget(el) {
+  if (el.namespaceURI !== "http://www.w3.org/1999/xhtml") return false;
+  const tag = el.tagName.toLowerCase();
+  if (!INSPECTOR_HTML_CONTAINER_TAGS.has(tag)) return false;
+  if (!el.classList.length) return false;
+  if (el.children.length === 0) return false;
+  const style = el.ownerDocument.defaultView.getComputedStyle(el);
+  if (!style) return false;
+  const hasBoxDecoration = hasVisibleBorder(style) || style.boxShadow !== "none" || hasVisiblePaint(style);
+  if (!hasBoxDecoration) return false;
+  const rect = el.getBoundingClientRect();
+  return rect.width >= 24 && rect.height >= 24;
+}
+
+function isInspectorSvgTarget(el) {
+  return el.namespaceURI === "http://www.w3.org/2000/svg" &&
+    !!(el.matches && el.matches(INSPECTOR_SVG_TARGET_SELECTOR));
+}
+
+function isInspectorHtmlTarget(el) {
+  if (el.namespaceURI !== "http://www.w3.org/1999/xhtml") return false;
+  const tag = el.tagName.toLowerCase();
+  if (INSPECTOR_HTML_IGNORED_TAGS.has(tag)) return false;
+  if (el.id) return true;
+  if (getMeaningfulDataAttributes(el).length > 0) return true;
+  if (INSPECTOR_HTML_MEDIA_TAGS.has(tag)) return true;
+  if (INSPECTOR_HTML_TEXT_TAGS.has(tag)) return !!getInspectorVisibleText(el);
+  if (isInspectorHtmlContainerTarget(el)) return true;
+  return isInspectorTextLeaf(el);
+}
+
+function isInspectorTarget(el) {
+  if (!el || el.nodeType !== Node.ELEMENT_NODE) return false;
+  if (!isInspectorVisible(el)) return false;
+  return isInspectorSvgTarget(el) || isInspectorHtmlTarget(el);
+}
+
 function buildInspectorName(el) {
   const tag = el.tagName.toLowerCase();
-  if (tag === "text") {
-    const textContent = normalizeInspectorName(el.textContent);
+
+  if (prefersTextInspectorName(el)) {
+    const textContent = getInspectorVisibleText(el);
     if (textContent) return textContent;
+  }
+
+  if (tag === "img") {
+    const alt = normalizeInspectorName(el.getAttribute("alt"));
+    if (alt) return alt;
   }
 
   const dataName = el.getAttribute("data-name");
@@ -435,31 +543,18 @@ function buildInspectorName(el) {
     return normalizeInspectorName(attr.value);
   }
 
+  if (isInspectorHtmlContainerTarget(el) && el.querySelector) {
+    const labelEl = el.querySelector(INSPECTOR_CONTAINER_LABEL_SELECTOR);
+    if (labelEl) {
+      const labelText = getInspectorVisibleText(labelEl);
+      if (labelText) return labelText;
+    }
+  }
+
   const firstClass = Array.from(el.classList).find(Boolean);
   if (firstClass) return normalizeInspectorName(firstClass);
 
   return tag;
-}
-
-function getSvgRootSelector(doc, svg) {
-  let selector = "svg";
-  if (svg.id) selector += "#" + escapeCssIdentifier(svg.id);
-  const dataSelector = buildDataAttributeSelector(svg);
-  const parent = svg.parentElement;
-  if (!dataSelector && parent && !svg.id) {
-    const siblingSvgs = Array.from(parent.children).filter(el => el.tagName && el.tagName.toLowerCase() === "svg");
-    if (siblingSvgs.length > 1) {
-      const index = siblingSvgs.indexOf(svg);
-      if (index >= 0) selector += ":nth-of-type(" + (index + 1) + ")";
-    }
-  } else if (!dataSelector && !parent && !svg.id) {
-    const allSvgs = Array.from(doc.querySelectorAll("svg"));
-    if (allSvgs.length > 1) {
-      const index = allSvgs.indexOf(svg);
-      if (index >= 0) selector += ":nth-of-type(" + (index + 1) + ")";
-    }
-  }
-  return selector + dataSelector;
 }
 
 function getSelectorPart(el) {
@@ -474,18 +569,21 @@ function getSelectorPart(el) {
   return selector + dataSelector;
 }
 
-function buildInspectorSelector(doc, svg, target) {
+function buildInspectorSelector(doc, target) {
   const parts = [];
   let current = target;
+  const stopAt = doc.body || doc.documentElement;
 
-  while (current && current !== svg) {
+  while (current && current !== stopAt && current !== doc.documentElement) {
     const part = getSelectorPart(current);
     parts.unshift(part);
     current = current.parentElement;
   }
 
-  return 'html[file="' + escapeAttributeValue(CURRENT_FILE_NAME) + '"] > ' +
-    [getSvgRootSelector(doc, svg)].concat(parts).join(" > ");
+  let selector = 'html[file="' + escapeAttributeValue(CURRENT_FILE_NAME) + '"]';
+  if (doc.body && (current === doc.body || doc.body.contains(target))) selector += " > body";
+  if (parts.length) selector += " > " + parts.join(" > ");
+  return selector;
 }
 
 function clearInspectorGlow(state) {
@@ -532,17 +630,10 @@ function flashInspectorGlow(state) {
   }, 300);
 }
 
-function ensureInspectorCursorStyle(doc) {
-  if (doc.getElementById("inspector-cursor-style")) return;
-  const style = doc.createElement("style");
-  style.id = "inspector-cursor-style";
-  style.textContent = INSPECTOR_LEAF_SELECTOR + "{cursor:pointer;}";
-  (doc.head || doc.documentElement).appendChild(style);
-}
-
 function bindInspectorTarget(el, state) {
   if (!el || el.__inspectorBound) return;
   el.__inspectorBound = true;
+  el.style.cursor = "pointer";
   el.addEventListener("mouseenter", () => {
     state.isFlashing = false;
     showInspectorGlow(state, el, INSPECTOR_GLOW_BLUE);
@@ -556,9 +647,8 @@ function bindInspectorTarget(el, state) {
     e.stopPropagation();
     try {
       const doc = el.ownerDocument;
-      const svg = el.ownerSVGElement;
-      if (!doc || !svg) return;
-      const selector = buildInspectorSelector(doc, svg, el);
+      if (!doc) return;
+      const selector = buildInspectorSelector(doc, el);
       const name = buildInspectorName(el);
       const copyText = "[" + name + "](" + selector + ")";
       window.parent.postMessage({ type: "inspector-copy", selector, copyText }, "*");
@@ -572,25 +662,24 @@ function bindInspectorTarget(el, state) {
 }
 
 function bindInspectorTargetsInSubtree(root, state) {
-  if (!root || root.nodeType !== Node.ELEMENT_NODE) return;
-  if (root.matches && root.matches(INSPECTOR_LEAF_SELECTOR)) bindInspectorTarget(root, state);
+  if (!root) return;
+  if (root.nodeType === Node.ELEMENT_NODE && isInspectorTarget(root)) bindInspectorTarget(root, state);
   if (root.querySelectorAll) {
-    for (const el of root.querySelectorAll(INSPECTOR_LEAF_SELECTOR)) {
-      bindInspectorTarget(el, state);
+    for (const el of root.querySelectorAll("*")) {
+      if (isInspectorTarget(el)) bindInspectorTarget(el, state);
     }
   }
 }
 
-function setupInspector(doc, svg) {
-  ensureInspectorCursorStyle(doc);
+function setupInspector(doc) {
   if (!doc.__inspectorState) {
     doc.__inspectorState = { removeTimer: null, isFlashing: false, currentTarget: null, originalInlineFilter: "" };
   }
   const state = doc.__inspectorState;
 
-  bindInspectorTargetsInSubtree(svg, state);
+  bindInspectorTargetsInSubtree(doc.documentElement, state);
 
-  if (!svg.__inspectorObserver) {
+  if (!doc.__inspectorObserver) {
     const observer = new MutationObserver((mutations) => {
       for (const mutation of mutations) {
         for (const node of mutation.addedNodes) {
@@ -598,8 +687,8 @@ function setupInspector(doc, svg) {
         }
       }
     });
-    observer.observe(svg, { childList: true, subtree: true });
-    svg.__inspectorObserver = observer;
+    observer.observe(doc.documentElement, { childList: true, subtree: true });
+    doc.__inspectorObserver = observer;
   }
 }
 
@@ -621,6 +710,24 @@ function figOnlyHTML(fw) {
     '<div class="fig-wrapper" id="fig-wrapper" data-target-w="' + fw + '">' +
       '<iframe id="fig-iframe" src="' + src + '" scrolling="no"></iframe>' +
     '</div></div>';
+}
+
+function getDocumentDimensions(doc) {
+  const root = doc.documentElement;
+  const body = doc.body;
+  const width = Math.max(
+    root ? root.scrollWidth : 0,
+    root ? root.clientWidth : 0,
+    body ? body.scrollWidth : 0,
+    body ? body.clientWidth : 0
+  );
+  const height = Math.max(
+    root ? root.scrollHeight : 0,
+    root ? root.clientHeight : 0,
+    body ? body.scrollHeight : 0,
+    body ? body.clientHeight : 0
+  );
+  return { width, height };
 }
 
 /* ── Build tabs ──────────────────────────────────────────────────────── */
@@ -700,6 +807,7 @@ function setupIframe() {
     console.log("[mockup] iframe.contentDocument exists:", !!iframe.contentDocument);
     if (iframe.contentDocument) {
       iframe.contentDocument.documentElement.setAttribute("file", CURRENT_FILE_NAME);
+      setupInspector(iframe.contentDocument);
     }
     // D3 renders the SVG asynchronously after the HTML loads,
     // so we poll until the SVG element appears in the iframe DOM.
@@ -716,7 +824,18 @@ function setupIframe() {
           return; // keep waiting (up to ~5s)
         }
         clearInterval(poll);
-        if (!svg) { console.warn("[mockup] SVG not found after " + attempts + " attempts"); fallback(); return; }
+        if (!svg) {
+          const dims = getDocumentDimensions(doc);
+          if (!dims.width || !dims.height) { console.warn("[mockup] no SVG and document has no dimensions after " + attempts + " attempts"); fallback(); return; }
+          const scale = targetW / dims.width;
+          console.log("[mockup] sizing from document: " + dims.width + "x" + dims.height + " (attempt #" + attempts + ")");
+          wrapper.style.width = targetW + "px";
+          wrapper.style.height = (dims.height * scale) + "px";
+          iframe.style.width = dims.width + "px";
+          iframe.style.height = dims.height + "px";
+          iframe.style.transform = "scale(" + scale + ")";
+          return;
+        }
         // Fix viewBox to include all content (strokes/borders may extend beyond declared dimensions)
         const bbox = svg.getBBox();
         const pad = 2;
@@ -736,7 +855,6 @@ function setupIframe() {
         iframe.style.width = svgW + "px";
         iframe.style.height = svgH + "px";
         iframe.style.transform = "scale(" + scale + ")";
-        setupInspector(doc, svg);
       } catch(e) {
         console.error("[mockup] poll error:", e);
         clearInterval(poll);

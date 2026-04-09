@@ -43,7 +43,7 @@ const FONT = "Source Sans 3, Source Sans Pro, system-ui, sans-serif";
 
 ### Semantic `data-*` markers
 
-Add short `data-*` labels to every meaningful SVG container and leaf element.
+Add short `data-*` labels to every meaningful SVG or HTML element.
 
 ```javascript
 const pointsG = g.append("g").attr("data-layer", "points");
@@ -64,8 +64,12 @@ legend.append("g").attr("data-legend-item", "Baseline A");
 arrowG.append("path").attr("data-edge", "retriever-to-reranker");
 ```
 
+```html
+<div data-section="motivation">Making LLMs Factual is Hard</div>
+```
+
 ```text
-[Ours:0](html[file="figure.html"] > svg[data-figure="example"] > g[data-layer="points"] > path.point[data-series="Ours"][data-point-id="0"])
+[Ours:0](html[file="figure.html"] > body > svg[data-figure="example"] > g[data-layer="points"] > path.point[data-series="Ours"][data-point-id="0"])
 ```
 
 ---
