@@ -41,6 +41,33 @@ For sans-serif figures:
 const FONT = "Source Sans 3, Source Sans Pro, system-ui, sans-serif";
 ```
 
+### Semantic `data-*` markers
+
+Add short `data-*` labels to every meaningful SVG container and leaf element.
+
+```javascript
+const pointsG = g.append("g").attr("data-layer", "points");
+
+pointsG.selectAll("path")
+  .data(data)
+  .join("path")
+  .attr("class", "point")
+  .attr("data-series", d => d.method)
+  .attr("data-point-id", (_, i) => i);
+```
+
+```javascript
+legend.append("g").attr("data-legend-item", "Baseline A");
+```
+
+```javascript
+arrowG.append("path").attr("data-edge", "retriever-to-reranker");
+```
+
+```text
+[Ours:0](html[file="figure.html"] > svg[data-figure="example"] > g[data-layer="points"] > path.point[data-series="Ours"][data-point-id="0"])
+```
+
 ---
 
 ## Color Palettes

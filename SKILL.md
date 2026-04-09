@@ -54,6 +54,14 @@ Write a single self-contained HTML file. Structure:
 
 **Font choice**: Source Serif 4 is the default — it pairs well with LaTeX's Computer Modern and renders reliably in Playwright. For sans-serif figures, use Source Sans 3.
 
+**Semantic `data-*` markers are required**: add short `data-*` labels to every meaningful SVG group and leaf element. Use figure-local names; do not invent a heavy naming scheme.
+
+Examples:
+- Scatter plot: points layer `g` might use `data-layer="points"`, and each point might use `data-series="Ours"` and `data-point-id="0"`.
+- Legend: a legend row might use `data-legend-item="Baseline A"`.
+- Architecture diagram: a box might use `data-node="retriever"` and an arrow might use `data-edge="retriever-to-reranker"`.
+- Inspector output example: `[Ours:0](html[file="figure.html"] > svg[data-figure="example"] > g[data-layer="points"] > path.point[data-series="Ours"][data-point-id="0"])`.
+
 ### 3. Preview in Paper Context
 
 Run the bundled preview server to see how the figure will look in an actual paper:
@@ -62,7 +70,7 @@ Run the bundled preview server to see how the figure will look in an actual pape
 node <skill-path>/scripts/preview.mjs <figure.html>
 ```
 
-Pass `--port <n>` if you want a fixed preview port. Without `--port`, the script starts a fresh preview server on a random available port greater than `18900` and prints the URL. If you explicitly request a port and a `paper-figure` preview server is already running there, the command reuses it. After starting, **show the preview URL to the user** so they can click to open it in their browser — the URL looks like `http://127.0.0.1:<selected-port>/projects/paper/fig1.html` — the path is relative to your home directory, no encoding needed.
+Pass `--port <n>` if you want a fixed preview port. Without `--port`, the script derives a stable preview port from the current `username + hostname`, maps it into the range greater than `18900`, and prints the URL. If a `paper-figure` preview server is already running on that derived port, the command reuses it; otherwise it starts a server there. If you explicitly request a port and a `paper-figure` preview server is already running there, the command also reuses it. After starting, **show the preview URL to the user** so they can click to open it in their browser — the URL looks like `http://127.0.0.1:<selected-port>/projects/paper/fig1.html` — the path is relative to your home directory, no encoding needed.
 
 This shows the figure embedded in a paper mockup with three layout modes (switchable via tabs):
 

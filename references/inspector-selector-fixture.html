@@ -1,0 +1,44 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>Inspector Selector Fixture</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body { background: #fff; font-family: "Source Serif 4", Georgia, serif; }
+    svg { display: block; }
+  </style>
+</head>
+<body>
+  <svg width="320" height="220" viewBox="0 0 320 220" xmlns="http://www.w3.org/2000/svg">
+    <g transform="translate(30,24)" data-layer="points">
+      <rect width="260" height="150" fill="none" stroke="#333" stroke-width="1" />
+      <path
+        class="point"
+        data-name="Ours:0"
+        data-series="Ours"
+        data-point-id="0"
+        d="M4.5,0A4.5,4.5,0,1,1,-4.5,0A4.5,4.5,0,1,1,4.5,0"
+        transform="translate(180,40)"
+        fill="#e15759"
+      />
+      <path
+        class="point"
+        data-name="Baseline:0"
+        data-series="Baseline"
+        data-point-id="0"
+        d="M0,-5L4.5,4H-4.5Z"
+        transform="translate(120,92)"
+        fill="#4e79a7"
+      />
+    </g>
+    <g transform="translate(214,34)" data-layer="legend">
+      <rect width="78" height="42" rx="4" fill="#fff" stroke="#d0d0d0" />
+      <g transform="translate(10,14)" data-legend-item="Ours">
+        <path d="M4.5,0A4.5,4.5,0,1,1,-4.5,0A4.5,4.5,0,1,1,4.5,0" fill="#e15759" />
+        <text x="12" y="4" font-size="10">Ours</text>
+      </g>
+    </g>
+  </svg>
+</body>
+</html>

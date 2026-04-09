@@ -7,8 +7,8 @@
  *
  * Then open the printed URL:
  *   http://127.0.0.1:<selected-port>/projects/paper/fig1.html
- *   Pass --port for a fixed port. Otherwise the script chooses a random
- *   available port greater than 18900.
+ *   Pass --port for a fixed port. Otherwise the script derives a stable
+ *   port from username+hostname in the range greater than 18900.
  *
  * Features:
  * - Universal: URL path maps to ~/path file
@@ -18,6 +18,7 @@
  * - File history: dropdown to switch between recently viewed figures
  */
 import http from "http";
+import crypto from "crypto";
 import fs from "fs";
 import os from "os";
 import { dirname, join, extname, basename, resolve, relative } from "path";
@@ -27,7 +28,7 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
 const SERVER_START_TIME = Date.now();
 const AUTO_PORT_MIN = 18901;
 const AUTO_PORT_MAX = 65535;
-const AUTO_PORT_RETRIES = 20;
+const AUTO_PORT_SPAN = AUTO_PORT_MAX - AUTO_PORT_MIN + 1;
 
 function exitWithError(message) {
   console.error(message);
@@ -45,8 +46,26 @@ function parsePort(value) {
   return port;
 }
 
-function randomAutoPort() {
-  return Math.floor(Math.random() * (AUTO_PORT_MAX - AUTO_PORT_MIN + 1)) + AUTO_PORT_MIN;
+function currentUsername() {
+  try {
+    const username = os.userInfo().username;
+    if (username) return username;
+  } catch {
+    // Fall through to environment-based fallback in restricted environments.
+  }
+  return process.env.USER || process.env.USERNAME || "unknown-user";
+}
+
+function autoPortIdentity() {
+  const hostname = os.hostname() || "unknown-host";
+  return `${currentUsername()}@${hostname}`;
+}
+
+function deriveStableAutoPort(identity) {
+  const hashHex = crypto.createHash("sha256").update(identity).digest("hex");
+  const hashPrefix = hashHex.slice(0, 8);
+  const hashValue = Number.parseInt(hashPrefix, 16) >>> 0;
+  return AUTO_PORT_MIN + (hashValue % AUTO_PORT_SPAN);
 }
 
 // ── Parse args ──────────────────────────────────────────────────────────
@@ -66,6 +85,14 @@ for (let i = 0; i < args.length; i++) {
   else if (!initialFile) initialFile = resolve(args[i]);
 }
 const portMode = requestedPort === null ? "auto" : "explicit";
+const autoPortKey = autoPortIdentity();
+const resolvedAutoPort = portMode === "auto" ? deriveStableAutoPort(autoPortKey) : null;
+
+function describePortMode() {
+  return portMode === "auto"
+    ? "auto (stable sha256(username@hostname))"
+    : "explicit";
+}
 
 // ── MIME types ───────────────────────────────────────────────────────────
 const MIME = {
@@ -328,6 +355,7 @@ const LAYOUTS = {
 };
 
 const FIG_SRC = "/f/${dirToken}/${figFileName}";
+const CURRENT_FILE_NAME = "${figFileName.replace(/\\/g, "\\\\").replace(/"/g, '\\"')}";
 const CURRENT_REL_PATH = "${currentRelPath}";
 const CURRENT_ABS_PATH = "${join(os.homedir(), currentRelPath).replace(/\\/g, '\\\\')}";
 const INSPECTOR_LEAF_SELECTOR = "rect,circle,path,text,line,ellipse,polygon,polyline,image";
@@ -365,13 +393,11 @@ function escapeAttributeValue(value) {
   return JSON.stringify(String(value)).slice(1, -1);
 }
 
-function getMeaningfulDataAttribute(el) {
-  for (const attr of el.attributes) {
-    if (!attr.name.startsWith("data-")) continue;
-    if (!attr.value || !attr.value.trim()) continue;
-    return attr;
-  }
-  return null;
+function getMeaningfulDataAttributes(el) {
+  return Array.from(el.attributes).filter((attr) => {
+    if (!attr.name.startsWith("data-")) return false;
+    return !!(attr.value && attr.value.trim());
+  });
 }
 
 function getNthOfType(el) {
@@ -384,47 +410,68 @@ function getNthOfType(el) {
   return index;
 }
 
-function isUniqueClassAmongSiblings(el, className) {
-  const parent = el.parentElement;
-  if (!parent) return true;
-  const selector = el.tagName.toLowerCase() + "." + escapeCssIdentifier(className);
-  return parent.querySelectorAll(":scope > " + selector).length === 1;
+function buildDataAttributeSelector(el) {
+  return getMeaningfulDataAttributes(el)
+    .map((attr) => "[" + attr.name + '="' + escapeAttributeValue(attr.value) + '"]')
+    .join("");
+}
+
+function normalizeInspectorName(value) {
+  return String(value || "").trim().replace(/\\s+/g, " ");
+}
+
+function buildInspectorName(el) {
+  const tag = el.tagName.toLowerCase();
+  if (tag === "text") {
+    const textContent = normalizeInspectorName(el.textContent);
+    if (textContent) return textContent;
+  }
+
+  const dataName = el.getAttribute("data-name");
+  if (dataName && dataName.trim()) return normalizeInspectorName(dataName);
+
+  for (const attr of getMeaningfulDataAttributes(el)) {
+    if (attr.name === "data-name") continue;
+    return normalizeInspectorName(attr.value);
+  }
+
+  const firstClass = Array.from(el.classList).find(Boolean);
+  if (firstClass) return normalizeInspectorName(firstClass);
+
+  return tag;
 }
 
 function getSvgRootSelector(doc, svg) {
+  let selector = "svg";
+  if (svg.id) selector += "#" + escapeCssIdentifier(svg.id);
+  const dataSelector = buildDataAttributeSelector(svg);
   const parent = svg.parentElement;
-  if (parent && !svg.id) {
+  if (!dataSelector && parent && !svg.id) {
     const siblingSvgs = Array.from(parent.children).filter(el => el.tagName && el.tagName.toLowerCase() === "svg");
     if (siblingSvgs.length > 1) {
       const index = siblingSvgs.indexOf(svg);
-      if (index >= 0) return "svg:nth-of-type(" + (index + 1) + ")";
+      if (index >= 0) selector += ":nth-of-type(" + (index + 1) + ")";
     }
-  } else if (!parent && !svg.id) {
+  } else if (!dataSelector && !parent && !svg.id) {
     const allSvgs = Array.from(doc.querySelectorAll("svg"));
     if (allSvgs.length > 1) {
       const index = allSvgs.indexOf(svg);
-      if (index >= 0) return "svg:nth-of-type(" + (index + 1) + ")";
+      if (index >= 0) selector += ":nth-of-type(" + (index + 1) + ")";
     }
   }
-  return "svg";
+  return selector + dataSelector;
 }
 
 function getSelectorPart(el) {
+  const dataSelector = buildDataAttributeSelector(el);
+  if (el.id) return "#" + escapeCssIdentifier(el.id) + dataSelector;
+
   const tag = el.tagName.toLowerCase();
-  if (el.id) return "#" + escapeCssIdentifier(el.id);
-
   const firstClass = Array.from(el.classList).find(Boolean);
-  if (firstClass) {
-    const base = tag + "." + escapeCssIdentifier(firstClass);
-    return isUniqueClassAmongSiblings(el, firstClass) ? base : base + ":nth-of-type(" + getNthOfType(el) + ")";
-  }
-
-  const dataAttr = getMeaningfulDataAttribute(el);
-  if (dataAttr) {
-    return tag + "[" + dataAttr.name + '="' + escapeAttributeValue(dataAttr.value) + '"]';
-  }
-
-  return tag + ":nth-of-type(" + getNthOfType(el) + ")";
+  let selector = tag;
+  if (firstClass) selector += "." + escapeCssIdentifier(firstClass);
+  if (!dataSelector) selector += ":nth-of-type(" + getNthOfType(el) + ")";
+  return selector + dataSelector;
 }
 
 function buildInspectorSelector(doc, svg, target) {
@@ -434,11 +481,11 @@ function buildInspectorSelector(doc, svg, target) {
   while (current && current !== svg) {
     const part = getSelectorPart(current);
     parts.unshift(part);
-    if (current.id) break;
     current = current.parentElement;
   }
 
-  return [getSvgRootSelector(doc, svg)].concat(parts).join(" > ");
+  return 'html[file="' + escapeAttributeValue(CURRENT_FILE_NAME) + '"] > ' +
+    [getSvgRootSelector(doc, svg)].concat(parts).join(" > ");
 }
 
 function clearInspectorGlow(state) {
@@ -493,32 +540,66 @@ function ensureInspectorCursorStyle(doc) {
   (doc.head || doc.documentElement).appendChild(style);
 }
 
+function bindInspectorTarget(el, state) {
+  if (!el || el.__inspectorBound) return;
+  el.__inspectorBound = true;
+  el.addEventListener("mouseenter", () => {
+    state.isFlashing = false;
+    showInspectorGlow(state, el, INSPECTOR_GLOW_BLUE);
+  });
+  el.addEventListener("mouseleave", () => {
+    if (state.isFlashing && state.currentTarget === el) return;
+    if (state.currentTarget === el) clearInspectorGlow(state);
+  });
+  el.addEventListener("click", (e) => {
+    e.preventDefault();
+    e.stopPropagation();
+    try {
+      const doc = el.ownerDocument;
+      const svg = el.ownerSVGElement;
+      if (!doc || !svg) return;
+      const selector = buildInspectorSelector(doc, svg, el);
+      const name = buildInspectorName(el);
+      const copyText = "[" + name + "](" + selector + ")";
+      window.parent.postMessage({ type: "inspector-copy", selector, copyText }, "*");
+      if (state.currentTarget !== el) showInspectorGlow(state, el, INSPECTOR_GLOW_BLUE);
+      flashInspectorGlow(state);
+    } catch (err) {
+      console.warn("[mockup] inspector click failed:", err);
+      clearInspectorGlow(state);
+    }
+  });
+}
+
+function bindInspectorTargetsInSubtree(root, state) {
+  if (!root || root.nodeType !== Node.ELEMENT_NODE) return;
+  if (root.matches && root.matches(INSPECTOR_LEAF_SELECTOR)) bindInspectorTarget(root, state);
+  if (root.querySelectorAll) {
+    for (const el of root.querySelectorAll(INSPECTOR_LEAF_SELECTOR)) {
+      bindInspectorTarget(el, state);
+    }
+  }
+}
+
 function setupInspector(doc, svg) {
   ensureInspectorCursorStyle(doc);
-  const state = { removeTimer: null, isFlashing: false, currentTarget: null, originalInlineFilter: "" };
+  if (!doc.__inspectorState) {
+    doc.__inspectorState = { removeTimer: null, isFlashing: false, currentTarget: null, originalInlineFilter: "" };
+  }
+  const state = doc.__inspectorState;
 
-  for (const el of svg.querySelectorAll(INSPECTOR_LEAF_SELECTOR)) {
-    el.addEventListener("mouseenter", () => {
-      state.isFlashing = false;
-      showInspectorGlow(state, el, INSPECTOR_GLOW_BLUE);
-    });
-    el.addEventListener("mouseleave", () => {
-      if (state.isFlashing && state.currentTarget === el) return;
-      if (state.currentTarget === el) clearInspectorGlow(state);
-    });
-    el.addEventListener("click", (e) => {
-      e.preventDefault();
-      e.stopPropagation();
-      try {
-        const selector = buildInspectorSelector(doc, svg, el);
-        window.parent.postMessage({ type: "inspector-copy", selector }, "*");
-        if (state.currentTarget !== el) showInspectorGlow(state, el, INSPECTOR_GLOW_BLUE);
-        flashInspectorGlow(state);
-      } catch (err) {
-        console.warn("[mockup] inspector click failed:", err);
-        clearInspectorGlow(state);
+  bindInspectorTargetsInSubtree(svg, state);
+
+  if (!svg.__inspectorObserver) {
+    const observer = new MutationObserver((mutations) => {
+      for (const mutation of mutations) {
+        for (const node of mutation.addedNodes) {
+          bindInspectorTargetsInSubtree(node, state);
+        }
       }
     });
+    observer.observe(svg, { childList: true, subtree: true });
+    svg.__inspectorObserver = observer;
   }
 }
 
@@ -617,6 +698,9 @@ function setupIframe() {
   iframe.onload = () => {
     console.log("[mockup] iframe onload fired, src=" + iframe.src);
     console.log("[mockup] iframe.contentDocument exists:", !!iframe.contentDocument);
+    if (iframe.contentDocument) {
+      iframe.contentDocument.documentElement.setAttribute("file", CURRENT_FILE_NAME);
+    }
     // D3 renders the SVG asynchronously after the HTML loads,
     // so we poll until the SVG element appears in the iframe DOM.
     let attempts = 0;
@@ -625,6 +709,7 @@ function setupIframe() {
       try {
         const doc = iframe.contentDocument;
         if (!doc) { console.warn("[mockup] poll #" + attempts + ": no contentDocument (cross-origin?)"); clearInterval(poll); fallback(); return; }
+        doc.documentElement.setAttribute("file", CURRENT_FILE_NAME);
         const svg = doc.querySelector("svg");
         if (!svg && attempts < 50) {
           if (attempts % 10 === 0) console.log("[mockup] poll #" + attempts + ": waiting for SVG...");
@@ -677,9 +762,13 @@ document.documentElement.classList.toggle("text-faded", document.getElementById(
 
 window.addEventListener("message", async (event) => {
   const data = event.data;
-  if (!data || data.type !== "inspector-copy" || typeof data.selector !== "string") return;
+  if (!data || data.type !== "inspector-copy") return;
+  const clipboardText = typeof data.copyText === "string"
+    ? data.copyText
+    : (typeof data.selector === "string" ? data.selector : null);
+  if (!clipboardText) return;
   try {
-    await navigator.clipboard.writeText(data.selector);
+    await navigator.clipboard.writeText(clipboardText);
   } catch (err) {
     console.warn("[mockup] clipboard write failed:", err);
   }
@@ -745,7 +834,11 @@ function generateDebugHTML(notFoundPath = null) {
           <td>${exists ? '<span style="color:#16a34a;">exists</span>' : '<span style="color:#dc2626;">missing</span>'}</td>
         </tr>`;
       }).join('');
-  const displayPort = resolvedPort ?? requestedPort ?? "pending";
+  const displayPort = resolvedPort ?? requestedPort ?? resolvedAutoPort ?? "pending";
+  const autoPortRows = portMode === "auto"
+    ? `<dt>Auto port key</dt><dd>${autoPortKey}</dd>
+      <dt>Auto port</dt><dd>${resolvedAutoPort}</dd>`
+    : "";
 
   return `<!DOCTYPE html>
 <html lang="en">
@@ -780,7 +873,8 @@ function generateDebugHTML(notFoundPath = null) {
       <dt>Platform</dt><dd>${os.platform()} ${os.arch()}</dd>
       <dt>Node.js</dt><dd>${process.version}</dd>
       <dt>Port</dt><dd>${displayPort}</dd>
-      <dt>Port mode</dt><dd>${portMode}</dd>
+      <dt>Port mode</dt><dd>${describePortMode()}</dd>
+      ${autoPortRows}
       <dt>Started at</dt><dd>${new Date(SERVER_START_TIME).toLocaleString()}</dd>
       <dt>Uptime</dt><dd>${uptimeStr}</dd>
       <dt>PID</dt><dd>${process.pid}</dd>
@@ -803,7 +897,7 @@ function generateDebugHTML(notFoundPath = null) {
 }
 
 function activeRequestPort() {
-  return resolvedPort ?? requestedPort ?? AUTO_PORT_MIN;
+  return resolvedPort ?? requestedPort ?? resolvedAutoPort ?? AUTO_PORT_MIN;
 }
 
 function requireResolvedPort() {
@@ -1041,28 +1135,32 @@ async function acquirePortAndStartServer() {
     }
   }
 
-  for (let attempt = 1; attempt <= AUTO_PORT_RETRIES; attempt++) {
-    const port = randomAutoPort();
-    const candidateServer = createPreviewServer();
-    try {
-      await listenOnPort(candidateServer, port);
-      previewServer = candidateServer;
-      resolvedPort = port;
-      return { baseUrl: baseUrlForPort(port), reused: false };
-    } catch (error) {
-      if (error && error.code === "EADDRINUSE") {
-        continue;
-      }
-      throw error;
-    }
+  const port = resolvedAutoPort;
+  if (await probeReusablePreviewServer(port)) {
+    resolvedPort = port;
+    return { baseUrl: baseUrlForPort(port), reused: true };
   }
 
-  throw new Error(`Failed to allocate a preview port above 18900 after ${AUTO_PORT_RETRIES} attempts.`);
+  const candidateServer = createPreviewServer();
+  try {
+    await listenOnPort(candidateServer, port);
+    previewServer = candidateServer;
+    resolvedPort = port;
+    return { baseUrl: baseUrlForPort(port), reused: false };
+  } catch (error) {
+    if (error && error.code === "EADDRINUSE") {
+      throw new Error(`Auto port ${port} derived from ${autoPortKey} is already in use by another process. Pass --port to override.`);
+    }
+    throw error;
+  }
 }
 
 function printStartupSummary(baseUrl, reused) {
   console.log(`Preview server ${reused ? "already running" : "running"} at ${baseUrl}`);
-  console.log(`Port mode: ${portMode}`);
+  console.log(`Port mode: ${describePortMode()}`);
+  if (portMode === "auto") {
+    console.log(`Auto port key: ${autoPortKey}`);
+  }
 
   if (initialFile) {
     console.log(`Figure: ${initialFile}`);
