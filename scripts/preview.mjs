@@ -237,6 +237,8 @@ function generateMockupHTML(figFileName, dirToken, currentRelPath, fileHistory) 
     background: #fff;
     box-shadow: 0 2px 16px rgba(0,0,0,0.15);
     position: relative; overflow: hidden;
+    user-select: none;
+    -webkit-user-select: none;
   }
   .text-area { position: absolute; overflow: hidden; }
 
@@ -307,6 +309,8 @@ function generateMockupHTML(figFileName, dirToken, currentRelPath, fileHistory) 
     background: #fff;
     box-shadow: 0 2px 16px rgba(0,0,0,0.15);
     padding: 12px;
+    user-select: none;
+    -webkit-user-select: none;
   }
 </style>
 </head>
@@ -368,6 +372,9 @@ const INSPECTOR_INLINE_TEXT_TAGS = new Set(["a", "abbr", "b", "br", "code", "em"
 const INSPECTOR_CONTAINER_LABEL_SELECTOR = "h1,h2,h3,h4,h5,h6,figcaption,caption,label,.label,.sub-title,.sec-title,.ftitle";
 const INSPECTOR_GLOW_BLUE = "#2563eb";
 const INSPECTOR_GLOW_GREEN = "#16a34a";
+const INSPECTOR_DRAG_THRESHOLD = 6;
+const INSPECTOR_SELECTION_FILL = "rgba(37, 99, 235, 0.14)";
+const INSPECTOR_SELECTION_STROKE = "rgba(37, 99, 235, 0.75)";
 
 /* ── Lorem ipsum ─────────────────────────────────────────────────────── */
 const L = [
@@ -586,18 +593,84 @@ function buildInspectorSelector(doc, target) {
   return selector;
 }
 
-function clearInspectorGlow(state) {
+function compareInspectorTargetsInDocumentOrder(a, b) {
+  if (a === b) return 0;
+  const position = a.compareDocumentPosition(b);
+  if (position & Node.DOCUMENT_POSITION_FOLLOWING) return -1;
+  if (position & Node.DOCUMENT_POSITION_PRECEDING) return 1;
+  return 0;
+}
+
+function buildInspectorCopyItems(doc, targets) {
+  return targets.map((target) => {
+    const selector = buildInspectorSelector(doc, target);
+    const name = buildInspectorName(target);
+    return {
+      name,
+      selector,
+      copyText: "[" + name + "](" + selector + ")",
+    };
+  });
+}
+
+function postInspectorCopy(doc, targets) {
+  const items = buildInspectorCopyItems(doc, targets);
+  if (!items.length) return;
+  window.parent.postMessage({
+    type: "inspector-copy",
+    items,
+    selector: items[0].selector,
+    copyText: items.map((item) => item.copyText).join("\\n"),
+  }, "*");
+}
+
+function clearInspectorFlashTimer(state) {
   if (state.removeTimer) {
     clearTimeout(state.removeTimer);
     state.removeTimer = null;
   }
-  if (state.currentTarget) {
-    if (state.originalInlineFilter) state.currentTarget.style.filter = state.originalInlineFilter;
-    else state.currentTarget.style.removeProperty("filter");
+}
+
+function pruneInspectorTargets(targets) {
+  const nextTargets = new Set();
+  for (const target of targets) {
+    if (target && target.isConnected) nextTargets.add(target);
   }
-  state.isFlashing = false;
-  state.currentTarget = null;
-  state.originalInlineFilter = "";
+  return nextTargets;
+}
+
+function updateInspectorEffects(state) {
+  if (state.hoverTarget && !state.hoverTarget.isConnected) state.hoverTarget = null;
+  state.selectionTargets = pruneInspectorTargets(state.selectionTargets);
+  state.flashTargets = pruneInspectorTargets(state.flashTargets);
+
+  const trackedTargets = new Set(state.baseInlineFilterByTarget.keys());
+  if (state.hoverTarget) trackedTargets.add(state.hoverTarget);
+  for (const target of state.selectionTargets) trackedTargets.add(target);
+  for (const target of state.flashTargets) trackedTargets.add(target);
+
+  for (const target of trackedTargets) {
+    if (!target || !target.isConnected) {
+      state.baseInlineFilterByTarget.delete(target);
+      continue;
+    }
+    if (!state.baseInlineFilterByTarget.has(target)) {
+      state.baseInlineFilterByTarget.set(target, target.style.filter);
+    }
+    const baseFilter = state.baseInlineFilterByTarget.get(target) || "";
+    const glowColor = state.flashTargets.has(target)
+      ? INSPECTOR_GLOW_GREEN
+      : ((state.hoverTarget === target || state.selectionTargets.has(target)) ? INSPECTOR_GLOW_BLUE : null);
+    const filters = [];
+    if (baseFilter) filters.push(baseFilter);
+    if (glowColor) filters.push(buildInspectorGlow(glowColor));
+    if (filters.length) target.style.filter = filters.join(" ");
+    else {
+      if (baseFilter) target.style.filter = baseFilter;
+      else target.style.removeProperty("filter");
+      state.baseInlineFilterByTarget.delete(target);
+    }
+  }
 }
 
 function buildInspectorGlow(color) {
@@ -608,26 +681,311 @@ function buildInspectorGlow(color) {
   ].join(" ");
 }
 
-function showInspectorGlow(state, target, color) {
-  clearInspectorGlow(state);
-  state.currentTarget = target;
-  state.originalInlineFilter = target.style.filter;
-  const filters = [];
-  if (state.originalInlineFilter) filters.push(state.originalInlineFilter);
-  filters.push(buildInspectorGlow(color));
-  target.style.filter = filters.join(" ");
+function setInspectorHoverTarget(state, target) {
+  const nextTarget = target && target.isConnected ? target : null;
+  if (state.hoverTarget === nextTarget) return;
+  state.hoverTarget = nextTarget;
+  updateInspectorEffects(state);
 }
 
-function flashInspectorGlow(state) {
-  if (!state.currentTarget) return;
-  state.isFlashing = true;
-  const filters = [];
-  if (state.originalInlineFilter) filters.push(state.originalInlineFilter);
-  filters.push(buildInspectorGlow(INSPECTOR_GLOW_GREEN));
-  state.currentTarget.style.filter = filters.join(" ");
+function setInspectorSelectionTargets(state, targets) {
+  state.selectionTargets = new Set(targets);
+  updateInspectorEffects(state);
+}
+
+function clearInspectorSelectionTargets(state) {
+  if (!state.selectionTargets.size) return;
+  state.selectionTargets.clear();
+  updateInspectorEffects(state);
+}
+
+function flashInspectorTargets(state, targets) {
+  clearInspectorFlashTimer(state);
+  state.flashTargets = new Set(targets.filter((target) => target && target.isConnected));
+  updateInspectorEffects(state);
+  if (!state.flashTargets.size) return;
   state.removeTimer = setTimeout(() => {
-    clearInspectorGlow(state);
+    state.flashTargets.clear();
+    state.removeTimer = null;
+    updateInspectorEffects(state);
   }, 300);
+}
+
+function ensureInspectorSelectionOverlay(doc) {
+  if (doc.__inspectorSelectionOverlay) return doc.__inspectorSelectionOverlay;
+
+  const overlayRoot = doc.createElement("div");
+  overlayRoot.__inspectorInternal = true;
+  overlayRoot.style.position = "fixed";
+  overlayRoot.style.inset = "0";
+  overlayRoot.style.pointerEvents = "none";
+  overlayRoot.style.zIndex = "2147483647";
+  overlayRoot.style.display = "none";
+
+  const box = doc.createElement("div");
+  box.__inspectorInternal = true;
+  box.style.position = "absolute";
+  box.style.border = "1px solid " + INSPECTOR_SELECTION_STROKE;
+  box.style.background = INSPECTOR_SELECTION_FILL;
+  box.style.boxShadow = "0 0 0 1px rgba(255,255,255,0.45) inset";
+
+  overlayRoot.appendChild(box);
+  (doc.body || doc.documentElement).appendChild(overlayRoot);
+  doc.__inspectorSelectionOverlay = { root: overlayRoot, box };
+  return doc.__inspectorSelectionOverlay;
+}
+
+function updateInspectorSelectionOverlay(doc, rect) {
+  const overlay = ensureInspectorSelectionOverlay(doc);
+  overlay.root.style.display = "block";
+  overlay.box.style.left = rect.left + "px";
+  overlay.box.style.top = rect.top + "px";
+  overlay.box.style.width = rect.width + "px";
+  overlay.box.style.height = rect.height + "px";
+}
+
+function hideInspectorSelectionOverlay(doc) {
+  const overlay = ensureInspectorSelectionOverlay(doc);
+  overlay.root.style.display = "none";
+  overlay.box.style.width = "0";
+  overlay.box.style.height = "0";
+}
+
+function buildInspectorSelectionRect(startX, startY, currentX, currentY) {
+  const left = Math.min(startX, currentX);
+  const top = Math.min(startY, currentY);
+  const right = Math.max(startX, currentX);
+  const bottom = Math.max(startY, currentY);
+  return {
+    left,
+    top,
+    right,
+    bottom,
+    width: right - left,
+    height: bottom - top,
+  };
+}
+
+function rectContainsRect(outer, inner) {
+  if (!(outer.width > 0 && outer.height > 0)) return false;
+  if (!(inner.width > 0 && inner.height > 0)) return false;
+  return outer.left <= inner.left &&
+    outer.top <= inner.top &&
+    outer.right >= inner.right &&
+    outer.bottom >= inner.bottom;
+}
+
+function getInspectorElementDepth(el) {
+  let depth = 0;
+  let current = el;
+  while (current && current.parentElement) {
+    depth++;
+    current = current.parentElement;
+  }
+  return depth;
+}
+
+function getLowestCommonAncestor(elements) {
+  if (!elements.length) return null;
+  let current = elements[0];
+  while (current && current.nodeType === Node.ELEMENT_NODE) {
+    const containsAll = elements.every((el) => current.contains(el));
+    if (containsAll) return current;
+    current = current.parentElement;
+  }
+  return null;
+}
+
+function collectInspectorSelectionTargets(doc, rect) {
+  const enclosedElements = [];
+  for (const el of doc.querySelectorAll("*")) {
+    if (el.__inspectorInternal) continue;
+    const bounds = el.getBoundingClientRect();
+    if (!rectContainsRect(rect, bounds)) continue;
+    if (!isInspectorVisible(el)) continue;
+    enclosedElements.push({ el, depth: getInspectorElementDepth(el) });
+  }
+
+  enclosedElements.sort((a, b) => b.depth - a.depth);
+
+  const deepestElements = [];
+  for (const { el } of enclosedElements) {
+    if (deepestElements.some((existing) => el.contains(existing))) continue;
+    deepestElements.push(el);
+  }
+
+  const commonAncestor = getLowestCommonAncestor(deepestElements);
+  return commonAncestor ? [commonAncestor] : [];
+}
+
+function disableInspectorUserSelect(doc, state) {
+  const root = doc.documentElement;
+  state.drag.originalUserSelect = root.style.userSelect;
+  state.drag.originalWebkitUserSelect = root.style.webkitUserSelect;
+  root.style.userSelect = "none";
+  root.style.webkitUserSelect = "none";
+}
+
+function restoreInspectorUserSelect(doc, state) {
+  const root = doc.documentElement;
+  root.style.userSelect = state.drag.originalUserSelect;
+  root.style.webkitUserSelect = state.drag.originalWebkitUserSelect;
+  state.drag.originalUserSelect = "";
+  state.drag.originalWebkitUserSelect = "";
+}
+
+function releaseInspectorPointerCapture(state) {
+  const captureTarget = state.drag.captureTarget;
+  const pointerId = state.drag.pointerId;
+  if (!captureTarget || pointerId === null) {
+    state.drag.captureTarget = null;
+    return;
+  }
+  try {
+    if (!captureTarget.hasPointerCapture || captureTarget.hasPointerCapture(pointerId)) {
+      captureTarget.releasePointerCapture(pointerId);
+    }
+  } catch {
+    // Ignore release failures when the pointer capture state has already been cleared.
+  }
+  state.drag.captureTarget = null;
+}
+
+function clearInspectorDragFrame(doc, state) {
+  if (!state.drag.frameHandle) return;
+  doc.defaultView.cancelAnimationFrame(state.drag.frameHandle);
+  state.drag.frameHandle = null;
+}
+
+function updateInspectorDragSelection(doc, state) {
+  if (!state.drag.isDragging) return;
+  const rect = buildInspectorSelectionRect(
+    state.drag.startX,
+    state.drag.startY,
+    state.drag.currentX,
+    state.drag.currentY
+  );
+  updateInspectorSelectionOverlay(doc, rect);
+  setInspectorSelectionTargets(state, collectInspectorSelectionTargets(doc, rect));
+}
+
+function queueInspectorDragSelectionUpdate(doc, state) {
+  if (state.drag.frameHandle) return;
+  state.drag.frameHandle = doc.defaultView.requestAnimationFrame(() => {
+    state.drag.frameHandle = null;
+    updateInspectorDragSelection(doc, state);
+  });
+}
+
+function startInspectorDrag(doc, state) {
+  state.drag.isDragging = true;
+  setInspectorHoverTarget(state, null);
+  clearInspectorFlashTimer(state);
+  state.flashTargets.clear();
+  updateInspectorEffects(state);
+  disableInspectorUserSelect(doc, state);
+  queueInspectorDragSelectionUpdate(doc, state);
+}
+
+function finishInspectorDrag(doc, state, shouldCopy) {
+  const selectedTargets = Array.from(state.selectionTargets).sort(compareInspectorTargetsInDocumentOrder);
+  clearInspectorDragFrame(doc, state);
+  hideInspectorSelectionOverlay(doc);
+  clearInspectorSelectionTargets(state);
+  restoreInspectorUserSelect(doc, state);
+
+  if (shouldCopy && selectedTargets.length) {
+    postInspectorCopy(doc, selectedTargets);
+    flashInspectorTargets(state, selectedTargets);
+  } else {
+    clearInspectorFlashTimer(state);
+    state.flashTargets.clear();
+    updateInspectorEffects(state);
+  }
+
+  releaseInspectorPointerCapture(state);
+  state.drag.pointerId = null;
+  state.drag.isDragging = false;
+  state.drag.startX = 0;
+  state.drag.startY = 0;
+  state.drag.currentX = 0;
+  state.drag.currentY = 0;
+}
+
+function bindInspectorDocumentInteractions(doc, state) {
+  if (doc.__inspectorInteractionsBound) return;
+
+  doc.addEventListener("pointerdown", (event) => {
+    if (event.button !== 0 || event.isPrimary === false) return;
+    if (state.drag.pointerId !== null) return;
+    state.drag.suppressNextClick = false;
+    state.drag.pointerId = event.pointerId;
+    state.drag.startX = event.clientX;
+    state.drag.startY = event.clientY;
+    state.drag.currentX = event.clientX;
+    state.drag.currentY = event.clientY;
+    state.drag.isDragging = false;
+    state.drag.captureTarget = null;
+    if (event.target && typeof event.target.setPointerCapture === "function") {
+      try {
+        event.target.setPointerCapture(event.pointerId);
+        state.drag.captureTarget = event.target;
+      } catch {
+        state.drag.captureTarget = null;
+      }
+    }
+  }, true);
+
+  doc.addEventListener("pointermove", (event) => {
+    if (event.pointerId !== state.drag.pointerId) return;
+    state.drag.currentX = event.clientX;
+    state.drag.currentY = event.clientY;
+    if (!state.drag.isDragging) {
+      const dx = state.drag.currentX - state.drag.startX;
+      const dy = state.drag.currentY - state.drag.startY;
+      if (Math.hypot(dx, dy) < INSPECTOR_DRAG_THRESHOLD) return;
+      startInspectorDrag(doc, state);
+    }
+    event.preventDefault();
+    queueInspectorDragSelectionUpdate(doc, state);
+  }, true);
+
+  const finishPointerSession = (event, shouldCopy) => {
+    if (event.pointerId !== state.drag.pointerId) return;
+    const wasDragging = state.drag.isDragging;
+    if (wasDragging) {
+      event.preventDefault();
+      event.stopPropagation();
+      state.drag.suppressNextClick = true;
+      finishInspectorDrag(doc, state, shouldCopy);
+    } else {
+      releaseInspectorPointerCapture(state);
+      state.drag.pointerId = null;
+      state.drag.captureTarget = null;
+    }
+  };
+
+  doc.addEventListener("pointerup", (event) => {
+    finishPointerSession(event, true);
+  }, true);
+
+  doc.addEventListener("pointercancel", (event) => {
+    finishPointerSession(event, false);
+  }, true);
+
+  doc.addEventListener("dragstart", (event) => {
+    if (state.drag.pointerId === null && !state.drag.isDragging) return;
+    event.preventDefault();
+  }, true);
+
+  doc.addEventListener("click", (event) => {
+    if (!state.drag.suppressNextClick) return;
+    state.drag.suppressNextClick = false;
+    event.preventDefault();
+    event.stopPropagation();
+  }, true);
+
+  doc.__inspectorInteractionsBound = true;
 }
 
 function bindInspectorTarget(el, state) {
@@ -635,28 +993,27 @@ function bindInspectorTarget(el, state) {
   el.__inspectorBound = true;
   el.style.cursor = "pointer";
   el.addEventListener("mouseenter", () => {
-    state.isFlashing = false;
-    showInspectorGlow(state, el, INSPECTOR_GLOW_BLUE);
+    if (state.drag.isDragging) return;
+    setInspectorHoverTarget(state, el);
   });
   el.addEventListener("mouseleave", () => {
-    if (state.isFlashing && state.currentTarget === el) return;
-    if (state.currentTarget === el) clearInspectorGlow(state);
+    if (state.drag.isDragging) return;
+    if (state.hoverTarget === el) setInspectorHoverTarget(state, null);
   });
   el.addEventListener("click", (e) => {
+    if (state.drag.suppressNextClick) return;
     e.preventDefault();
     e.stopPropagation();
     try {
       const doc = el.ownerDocument;
       if (!doc) return;
-      const selector = buildInspectorSelector(doc, el);
-      const name = buildInspectorName(el);
-      const copyText = "[" + name + "](" + selector + ")";
-      window.parent.postMessage({ type: "inspector-copy", selector, copyText }, "*");
-      if (state.currentTarget !== el) showInspectorGlow(state, el, INSPECTOR_GLOW_BLUE);
-      flashInspectorGlow(state);
+      postInspectorCopy(doc, [el]);
+      flashInspectorTargets(state, [el]);
     } catch (err) {
       console.warn("[mockup] inspector click failed:", err);
-      clearInspectorGlow(state);
+      clearInspectorFlashTimer(state);
+      state.flashTargets.clear();
+      updateInspectorEffects(state);
     }
   });
 }
@@ -673,11 +1030,32 @@ function bindInspectorTargetsInSubtree(root, state) {
 
 function setupInspector(doc) {
   if (!doc.__inspectorState) {
-    doc.__inspectorState = { removeTimer: null, isFlashing: false, currentTarget: null, originalInlineFilter: "" };
+    doc.__inspectorState = {
+      removeTimer: null,
+      hoverTarget: null,
+      selectionTargets: new Set(),
+      flashTargets: new Set(),
+      baseInlineFilterByTarget: new Map(),
+      drag: {
+        pointerId: null,
+        captureTarget: null,
+        isDragging: false,
+        suppressNextClick: false,
+        startX: 0,
+        startY: 0,
+        currentX: 0,
+        currentY: 0,
+        frameHandle: null,
+        originalUserSelect: "",
+        originalWebkitUserSelect: "",
+      },
+    };
   }
   const state = doc.__inspectorState;
 
   bindInspectorTargetsInSubtree(doc.documentElement, state);
+  bindInspectorDocumentInteractions(doc, state);
+  ensureInspectorSelectionOverlay(doc);
 
   if (!doc.__inspectorObserver) {
     const observer = new MutationObserver((mutations) => {
